@@ -80,7 +80,7 @@ def test_batch_keeps_context_ids_and_placeholders(
 ) -> None:
     request = 'Title: Mastering Diverse Domains through World Models\nGlossary: critic -> 价值网络\n[{"id": 7, "input": "Critic learning {v1}<style id=\'2\'>1.44 bits</style>"}]'
     draft = json.dumps(
-        [{"id": 7, "output": "批评学习 {v1}<style id='2'>1 以下44比特</style>"}]
+        [{"id": 7, "output": "批评学习 {v1}<style id='2'>1 以下 44 比特</style>"}]
     )
     revised = json.dumps(
         [{"id": 7, "output": "价值网络学习 {v1}<style id='2'>1.44 比特</style>"}]
