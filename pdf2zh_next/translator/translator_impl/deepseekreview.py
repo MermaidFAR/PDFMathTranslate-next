@@ -1,7 +1,10 @@
 import json
 import logging
 import re
+import threading
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import openai
 from pdf2zh_next.config.model import SettingsModel
@@ -156,6 +159,8 @@ class DeepSeekReviewTranslator(OpenAITranslator):
             raise TypeError("DeepSeekReview requires DeepSeekReviewSettings")
         self.domain = config.deepseek_review_domain
         self.context = config.deepseek_review_context
+        self._review_failures: set[tuple[str, str | None]] = set()
+        self._review_lock = threading.Lock()
         self.translation_system_prompt = TRANSLATION_SYSTEM_PROMPT
         if config.deepseek_review_translation_prompt:
             self.translation_system_prompt = (
@@ -202,6 +207,45 @@ class DeepSeekReviewTranslator(OpenAITranslator):
 
     def prompt(self, text: str) -> list[dict[str, str]]:
         return self.llm_prompt(super().prompt(text)[0]["content"])
+
+    @contextmanager
+    def _track_review(self, kind: str, text: str | None) -> Iterator[None]:
+        request = (kind, text)
+        try:
+            yield
+        except Exception:
+            with self._review_lock:
+                self._review_failures.add(request)
+            raise
+        else:
+            with self._review_lock:
+                self._review_failures.discard(request)
+
+    def raise_for_incomplete_reviews(self) -> None:
+        with self._review_lock:
+            if self._review_failures:
+                raise ValueError(
+                    "DeepSeek text review has unresolved failed requests; "
+                    "BabelDOC fallback output cannot be marked as reviewed"
+                )
+
+    def translate(
+        self,
+        text: str,
+        ignore_cache: bool = False,
+        rate_limit_params: dict | None = None,
+    ) -> str:
+        with self._track_review("plain", text):
+            return super().translate(text, ignore_cache, rate_limit_params)
+
+    def llm_translate(
+        self,
+        text: str | None,
+        ignore_cache: bool = False,
+        rate_limit_params: dict | None = None,
+    ) -> str | None:
+        with self._track_review("llm", text):
+            return super().llm_translate(text, ignore_cache, rate_limit_params)
 
     def do_translate(self, text: str, rate_limit_params: dict | None = None) -> str:
         draft = super().do_translate(text, rate_limit_params)

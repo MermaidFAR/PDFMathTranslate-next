@@ -87,6 +87,28 @@ def test_reviewed_text_reaches_cache(engine: DeepSeekReviewTranslator) -> None:
     assert source in draft_payload["original_request"]
 
 
+@pytest.mark.parametrize("method", ["translate", "llm_translate"])
+def test_unresolved_review_failure_blocks_fallback_until_successful_retry(
+    engine: DeepSeekReviewTranslator, method: str
+) -> None:
+    engine.client.chat.completions.create.side_effect = [
+        completion("草稿"),
+        completion("not JSON"),
+    ]
+    with pytest.raises(ValueError, match="invalid JSON"):
+        getattr(engine, method)("actor")
+    with pytest.raises(ValueError, match="unresolved failed requests"):
+        engine.raise_for_incomplete_reviews()
+    engine.client.chat.completions.create.side_effect = [
+        completion("草稿"),
+        completion(json.dumps({"translation": "策略网络"})),
+    ]
+    assert getattr(engine, method)("actor") == "策略网络"
+    engine.raise_for_incomplete_reviews()
+    assert getattr(engine, method)("actor") == "策略网络"
+    engine.raise_for_incomplete_reviews()
+
+
 def test_batch_keeps_context_ids_and_placeholders(
     engine: DeepSeekReviewTranslator,
 ) -> None:
