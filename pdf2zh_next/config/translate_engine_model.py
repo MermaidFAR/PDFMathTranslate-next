@@ -276,10 +276,19 @@ class DeepSeekReviewSettings(BaseModel):
         description="DeepSeek model for translation and review",
     )
     deepseek_review_domain: str = Field(
-        default="", description="Subject area for review, e.g. reinforcement learning"
+        default="", description="Subject area for translation and review"
     )
     deepseek_review_context: str = Field(
-        default="", description="Document background or terminology guidance for review"
+        default="",
+        description="Document background or terminology guidance for both passes",
+    )
+    deepseek_review_translation_prompt: str | None = Field(
+        default=None,
+        description="Custom system prompt for the initial academic translation",
+    )
+    deepseek_review_prompt: str | None = Field(
+        default=None,
+        description="Custom system prompt for reviewing the draft translation",
     )
 
     def validate_settings(self) -> None:
@@ -287,6 +296,10 @@ class DeepSeekReviewSettings(BaseModel):
         self.deepseek_review_model = self.deepseek_review_model.strip()
         self.deepseek_review_domain = self.deepseek_review_domain.strip()
         self.deepseek_review_context = self.deepseek_review_context.strip()
+        self.deepseek_review_translation_prompt = (
+            _clean_string(self.deepseek_review_translation_prompt) or None
+        )
+        self.deepseek_review_prompt = _clean_string(self.deepseek_review_prompt) or None
         if not self.deepseek_review_api_key:
             raise ValueError("DeepSeek review API key is required")
         if not self.deepseek_review_model:

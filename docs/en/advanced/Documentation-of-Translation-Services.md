@@ -36,6 +36,15 @@ pdf2zh_next paper.pdf --deepseekreview \
 | `--deepseek-review-model` | `deepseek-flash` | Model for both translation and review. |
 | `--deepseek-review-domain` | Empty | Optional subject area; inferred from available context when omitted. |
 | `--deepseek-review-context` | Empty | Optional document background or terminology guidance. |
+| `--deepseek-review-translation-prompt` | Built-in academic translator | Custom system instructions for the initial translation. |
+| `--deepseek-review-prompt` | Built-in scientific editor | Custom system instructions for reviewing the draft. |
+
+The two passes use independent system prompts. Translation focuses on faithful,
+fluent academic text; review compares source and draft for errors and revises the
+text. Both receive the domain/background and the original request. Custom prompts
+retain mandatory output-format and placeholder rules. Changing either prompt
+invalidates the corresponding reviewed-response cache. Both passes continue to
+use the official DeepSeek API with the configured key and model.
 
 The reviewer receives the complete original translation request, including any
 document/section titles, paragraph batch and glossary supplied by BabelDOC, plus

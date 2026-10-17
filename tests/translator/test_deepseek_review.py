@@ -12,12 +12,17 @@ from pdf2zh_next.config.main import ConfigManager
 from pdf2zh_next.config.main import build_args_parser
 from pdf2zh_next.config.model import SettingsModel
 from pdf2zh_next.config.translate_engine_model import GUI_PASSWORD_FIELDS
+from pdf2zh_next.config.translate_engine_model import OpenAISettings
 from pdf2zh_next.translator.cache import clean_test_db
 from pdf2zh_next.translator.cache import init_test_db
 from pdf2zh_next.translator.translator_impl.deepseekreview import REVIEW_SYSTEM_PROMPT
 from pdf2zh_next.translator.translator_impl.deepseekreview import (
+    TRANSLATION_SYSTEM_PROMPT,
+)
+from pdf2zh_next.translator.translator_impl.deepseekreview import (
     DeepSeekReviewTranslator,
 )
+from pdf2zh_next.translator.translator_impl.openai import OpenAITranslator
 from pdf2zh_next.translator.utils import get_translator
 from tenacity import wait_none
 
@@ -73,6 +78,13 @@ def test_reviewed_text_reaches_cache(engine: DeepSeekReviewTranslator) -> None:
     assert payload["domain"] == "reinforcement learning"
     assert "DreamerV3" in payload["background"]
     assert engine.token_count.value == 60
+    draft_call = engine.client.chat.completions.create.call_args_list[0].kwargs
+    assert draft_call["messages"][0]["content"] == TRANSLATION_SYSTEM_PROMPT
+    assert draft_call["messages"][0]["content"] != review["messages"][0]["content"]
+    draft_payload = json.loads(draft_call["messages"][1]["content"])
+    assert draft_payload["domain"] == payload["domain"]
+    assert draft_payload["background"] == payload["background"]
+    assert source in draft_payload["original_request"]
 
 
 def test_batch_keeps_context_ids_and_placeholders(
@@ -97,6 +109,11 @@ def test_batch_keeps_context_ids_and_placeholders(
         engine.client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
     )
     assert payload["original_request"] == request
+    draft_call = engine.client.chat.completions.create.call_args_list[0].kwargs
+    assert draft_call["messages"][0]["content"] == TRANSLATION_SYSTEM_PROMPT
+    assert (
+        json.loads(draft_call["messages"][1]["content"])["original_request"] == request
+    )
     assert engine.client.chat.completions.create.call_args.kwargs[
         "response_format"
     ] == {"type": "json_object"}
@@ -173,9 +190,15 @@ def test_cache_separates_review_context(engine: DeepSeekReviewTranslator) -> Non
 
 
 def test_settings_cli_env_and_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
-    config = DeepSeekReviewSettings(deepseek_review_api_key=" test-key ")
+    config = DeepSeekReviewSettings(
+        deepseek_review_api_key=" test-key ",
+        deepseek_review_translation_prompt=" Translate scientific prose. ",
+        deepseek_review_prompt=" Check scientific accuracy. ",
+    )
     config.validate_settings()
     assert config.deepseek_review_api_key == "test-key"
+    assert config.deepseek_review_translation_prompt == "Translate scientific prose."
+    assert config.deepseek_review_prompt == "Check scientific accuracy."
     assert "deepseek_review_api_key" in GUI_PASSWORD_FIELDS
     cli = CLIEnvSettingsModel(deepseekreview=True, deepseekreview_detail=config)
     settings = cli.to_settings_model()
@@ -185,13 +208,34 @@ def test_settings_cli_env_and_round_trip(monkeypatch: pytest.MonkeyPatch) -> Non
     assert restored.translate_engine_settings == config
     parser, _ = build_args_parser()
     args = parser.parse_args(
-        ["--deepseekreview", "--deepseek-review-domain", "robotics"]
+        [
+            "--deepseekreview",
+            "--deepseek-review-domain",
+            "robotics",
+            "--deepseek-review-translation-prompt",
+            "Translate robotics research.",
+            "--deepseek-review-prompt",
+            "Check physical units.",
+        ]
     )
     assert args.deepseekreview is True
     assert args.deepseek_review_domain == "robotics"
+    assert args.deepseek_review_translation_prompt == "Translate robotics research."
+    assert args.deepseek_review_prompt == "Check physical units."
     monkeypatch.setenv("PDF2ZH_DEEPSEEK_REVIEW_API_KEY", "env-test-key")
+    monkeypatch.setenv(
+        "PDF2ZH_DEEPSEEK_REVIEW_TRANSLATION_PROMPT", "Translate faithfully."
+    )
+    monkeypatch.setenv("PDF2ZH_DEEPSEEK_REVIEW_PROMPT", "Review faithfully.")
     env = ConfigManager().parse_env_vars()
     assert env["deepseekreview_detail"]["deepseek_review_api_key"] == "env-test-key"
+    assert (
+        env["deepseekreview_detail"]["deepseek_review_translation_prompt"]
+        == "Translate faithfully."
+    )
+    assert (
+        env["deepseekreview_detail"]["deepseek_review_prompt"] == "Review faithfully."
+    )
 
 
 @pytest.mark.parametrize("field", ["deepseek_review_api_key", "deepseek_review_model"])
@@ -260,3 +304,62 @@ def test_factory_dispatches_review_engine(engine: DeepSeekReviewTranslator) -> N
     translator = get_translator(settings)
     assert isinstance(translator, DeepSeekReviewTranslator)
     assert engine.client.chat.completions.create.call_count == 2
+
+
+def test_custom_prompts_apply_to_separate_passes(
+    engine: DeepSeekReviewTranslator,
+) -> None:
+    settings = SettingsModel(
+        translate_engine_settings=DeepSeekReviewSettings(
+            deepseek_review_api_key="test-key",
+            deepseek_review_translation_prompt="Translate using robotics terminology.",
+            deepseek_review_prompt="Review negation and physical units carefully.",
+        )
+    )
+    custom = DeepSeekReviewTranslator(settings, MagicMock())
+    engine.client.chat.completions.create.side_effect = [
+        completion("草稿"),
+        completion('{"translation":"译文"}'),
+    ]
+    assert custom.llm_translate("request") == "译文"
+    calls = custom.client.chat.completions.create.call_args_list
+    translation_prompt = calls[0].kwargs["messages"][0]["content"]
+    review_prompt = calls[1].kwargs["messages"][0]["content"]
+    assert translation_prompt.startswith("Translate using robotics terminology.")
+    assert "Review negation" not in translation_prompt
+    assert review_prompt.startswith("Review negation and physical units carefully.")
+    assert '"translation"' in review_prompt
+    assert "JSON" in translation_prompt
+
+
+@pytest.mark.parametrize(
+    "field", ["deepseek_review_translation_prompt", "deepseek_review_prompt"]
+)
+def test_prompt_changes_separate_cached_results(
+    engine: DeepSeekReviewTranslator, field: str
+) -> None:
+    settings = SettingsModel(
+        translate_engine_settings=DeepSeekReviewSettings(
+            deepseek_review_api_key="test-key",
+            deepseek_review_domain=engine.domain,
+            deepseek_review_context=engine.context,
+            **{field: "Custom scientific editing instructions."},
+        )
+    )
+    custom = DeepSeekReviewTranslator(settings, MagicMock())
+    engine.cache.set("request", "cached review")
+    assert custom.cache.get("request") is None
+
+
+def test_plain_openai_llm_messages_remain_unchanged(
+    engine: DeepSeekReviewTranslator,
+) -> None:
+    settings = SettingsModel(
+        translate_engine_settings=OpenAISettings(openai_api_key="test-key")
+    )
+    translator = OpenAITranslator(settings, MagicMock())
+    engine.client.chat.completions.create.return_value = completion("translated")
+    assert translator.do_llm_translate("original request") == "translated"
+    assert translator.client.chat.completions.create.call_args.kwargs["messages"] == [
+        {"role": "user", "content": "original request"}
+    ]
